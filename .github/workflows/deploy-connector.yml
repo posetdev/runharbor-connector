@@ -1,0 +1,87 @@
+name: Deploy Connector
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-connector
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      PURCHASE_MODE: ${{ vars.PURCHASE_MODE }}
+      ALLOWED_INSTANCE_TYPES: ${{ vars.ALLOWED_INSTANCE_TYPES }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
+      RUNHARBOR_DEPLOYMENT_ID: ${{ vars.RUNHARBOR_DEPLOYMENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the repository default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+
+      - run: npm ci
+
+      - run: node scripts/package-lambda.mjs --entry start
+      - run: node scripts/package-lambda.mjs --entry runner
+      - run: node scripts/package-lambda.mjs --entry setup
+      - run: node scripts/package-lambda.mjs --entry timeout
+
+      - name: Fetch onboarding configuration
+        run: node scripts/onboarding-config.mjs
+
+      - name: Write Terraform variables
+        run: |
+          test -n "$AWS_REGION" && test -n "$TF_STATE_BUCKET"
+          extra=()
+          if [ -n "${PURCHASE_MODE}" ]; then extra+=(--purchase-mode "$PURCHASE_MODE"); fi
+          if [ -n "${ALLOWED_INSTANCE_TYPES}" ]; then extra+=(--allowed-instance-types "$ALLOWED_INSTANCE_TYPES"); fi
+          node cli/runharbor.mjs init \
+            --config .runharbor/deployment.json \
+            --region "$AWS_REGION" \
+            "${extra[@]}"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Confirm AWS account
+        run: |
+          if [ -n "$AWS_ACCOUNT_ID" ]; then
+            test "$(aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: 1.15.9 }
+
+      - name: terraform init
+        run: |
+          terraform -chdir=infra/roots/connector init \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="key=${TF_STATE_KEY:-runharbor/connector.tfstate}" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="use_lockfile=true"
+
+      - name: terraform plan and apply
+        run: |
+          terraform -chdir=infra/roots/connector plan -out=tfplan
+          terraform -chdir=infra/roots/connector apply -auto-approve tfplan
+
+      - name: Publish setup continuation
+        run: node cli/runharbor.mjs setup --print-url

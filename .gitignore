@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.example.tfvars
+.env
+.env.*
+!.env.example
+*.pem
+.openpair.yml
+.runharbor/

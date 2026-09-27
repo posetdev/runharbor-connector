@@ -1,0 +1,451 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Creates only the customer IAM role that GitHub Actions assumes to deploy the
+  RunHarbor Connector. Trust is a single repository plus a single GitHub
+  Environment. The template never uses wildcard OIDC subjects and never creates
+  long-lived AWS access keys. The account-wide GitHub OIDC provider must already
+  exist; this stack does not create it.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub organization or user that owns the Connector repository (no wildcards).
+    AllowedPattern: '^[A-Za-z0-9._-]+$'
+    ConstraintDescription: GitHub owner must be a single owner name with no slashes or wildcards.
+  GitHubOwnerId:
+    Type: String
+    Description: Numeric GitHub owner id (GET /users/{owner} → id). Required for immutable OIDC subjects.
+    AllowedPattern: '^[1-9][0-9]{0,15}$'
+  GitHubRepository:
+    Type: String
+    Description: Connector repository name (no wildcards, no owner prefix).
+    AllowedPattern: '^[A-Za-z0-9._-]+$'
+    ConstraintDescription: GitHub repository must be a single name with no slashes or wildcards.
+  GitHubRepositoryId:
+    Type: String
+    Description: Numeric GitHub repository id (GET /repos/{owner}/{repo} → id). Required for immutable OIDC subjects.
+    AllowedPattern: '^[1-9][0-9]{0,15}$'
+  GitHubEnvironment:
+    Type: String
+    Description: Protected GitHub Environment the deploy workflow uses for apply.
+    Default: production
+    AllowedPattern: '^[A-Za-z0-9._-]{1,32}$'
+  RoleName:
+    Type: String
+    Description: IAM role name for GitHub Actions to assume.
+    Default: runharbor-gha-deployer
+    AllowedPattern: '^[\w+=,.@-]{1,64}$'
+  TerraformStateBucketName:
+    Type: String
+    Description: Existing customer S3 bucket that will store Terraform state for the Connector.
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+
+Resources:
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: GitHub Actions OIDC role for deploying the RunHarbor Connector
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubActionsOidcEnvironment
+            Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub
+                  - 'repo:${Owner}@${OwnerId}/${Repo}@${RepoId}:environment:${Environment}'
+                  - Owner: !Ref GitHubOwner
+                    OwnerId: !Ref GitHubOwnerId
+                    Repo: !Ref GitHubRepository
+                    RepoId: !Ref GitHubRepositoryId
+                    Environment: !Ref GitHubEnvironment
+      Policies:
+        - PolicyName: ConnectorTerraformApply
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadIdentity
+                Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: '*'
+              - Sid: TerraformState
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:aws:s3:::${TerraformStateBucketName}/*
+              - Sid: TerraformStateList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                Resource: !Sub arn:aws:s3:::${TerraformStateBucketName}
+              - Sid: ManageConnectorIam
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRoleTags
+                  - iam:PassRole
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:TagInstanceProfile
+                  - iam:UntagInstanceProfile
+                  - iam:ListInstanceProfilesForRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/rh-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/rh-*
+              - Sid: CreateSpotServiceLinkedRole
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: arn:aws:iam::*:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: spot.amazonaws.com
+              - Sid: ManageConnectorLambda
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:GetFunctionCodeSigningConfig
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:ListVersionsByFunction
+                  - lambda:CreateFunctionUrlConfig
+                  - lambda:GetFunctionUrlConfig
+                  - lambda:UpdateFunctionUrlConfig
+                  - lambda:DeleteFunctionUrlConfig
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetPolicy
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:rh-*
+              - Sid: ManageConnectorDynamoDb
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DeleteTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:DescribeTimeToLive
+                  - dynamodb:UpdateTimeToLive
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:ListTagsOfResource
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rh-*
+              - Sid: ManageConnectorSsm
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:DeleteParameter
+                  - ssm:AddTagsToResource
+                  - ssm:RemoveTagsFromResource
+                  - ssm:ListTagsForResource
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/runharbor/*
+              - Sid: DescribeParameters
+                # Terraform reads SSM parameter metadata during plan/apply.
+                # AWS does not support resource-level authorization for
+                # ssm:DescribeParameters, so Resource must be "*".
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*'
+              - Sid: ReadCanonicalUbuntuAmiParameters
+                # The host AMI id is resolved at deploy time from Canonical's
+                # Ubuntu public SSM parameters (see
+                # infra/modules/connector/locals.tf). Public parameters live
+                # under /aws/service/... and carry no account id in their ARN,
+                # so the resource is read-only and names only that hierarchy.
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: arn:aws:ssm:*::parameter/aws/service/canonical/*
+              - Sid: ManageConnectorLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:ListTagsForResource
+                  - logs:TagResource
+                  - logs:UntagResource
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rh-*
+              - Sid: DescribeLogGroups
+                # Terraform reads CloudWatch log groups during plan/apply.
+                # AWS does not support resource-level authorization for
+                # logs:DescribeLogGroups, so Resource must be "*".
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                Resource: '*'
+              - Sid: DescribeImagesAndNetwork
+                Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeVpcAttribute
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeTags
+                  - ec2:DescribeAccountAttributes
+                Resource: '*'
+              # Network and security-group mutations are limited to resources tagged
+              # runharbor:managed=true (local.tags). Resource types and which
+              # condition key each one honors are from
+              # https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonec2.html
+              # Create calls that carry TagSpecifications also authorize ec2:CreateTags
+              # with ec2:CreateAction set to the create action:
+              # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/supported-iam-actions-tagging.html
+              # AWS provider ~> 6 sends those tags on the create call (TagSpecifications
+              # in vpc_.go, vpc_subnet.go, vpc_internet_gateway.go, vpc_route_table.go,
+              # vpc_security_group.go). There is no NAT, peering, transit gateway, or VPN permission.
+              - Sid: CreateTaggedRunnerNetwork
+                # CreateVpc → vpc* RequestTag only. CreateInternetGateway → internet-gateway* RequestTag only.
+                # Neither action has a parent resource.
+                Effect: Allow
+                Action:
+                  - ec2:CreateVpc
+                  - ec2:CreateInternetGateway
+                Resource:
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:internet-gateway/*
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+                  "ForAllValues:StringEquals":
+                    "aws:TagKeys":
+                      - "runharbor:managed"
+                      - "runharbor:deployment-id"
+              - Sid: CreateTaggedRunnerSubnet
+                # CreateSubnet → subnet* uses RequestTag. The parent vpc* uses ResourceTag and is a separate statement.
+                Effect: Allow
+                Action:
+                  - ec2:CreateSubnet
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+                  "ForAllValues:StringEquals":
+                    "aws:TagKeys":
+                      - "runharbor:managed"
+                      - "runharbor:deployment-id"
+              - Sid: CreateTaggedRunnerRouteTable
+                # CreateRouteTable → route-table* uses RequestTag. The parent vpc* is required and uses ResourceTag.
+                Effect: Allow
+                Action:
+                  - ec2:CreateRouteTable
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:route-table/*
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+                  "ForAllValues:StringEquals":
+                    "aws:TagKeys":
+                      - "runharbor:managed"
+                      - "runharbor:deployment-id"
+              - Sid: CreateTaggedRunnerSecurityGroup
+                # CreateSecurityGroup → security-group* uses RequestTag. vpc is not marked required, but a
+                # non-default VPC is still authorized and that resource type only lists ResourceTag.
+                Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+                  "ForAllValues:StringEquals":
+                    "aws:TagKeys":
+                      - "runharbor:managed"
+                      - "runharbor:deployment-id"
+              - Sid: CreateRunnerChildInTaggedVpc
+                # Parent vpc* for CreateSubnet, CreateRouteTable, and CreateSecurityGroup.
+                Effect: Allow
+                Action:
+                  - ec2:CreateSubnet
+                  - ec2:CreateRouteTable
+                  - ec2:CreateSecurityGroup
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+              - Sid: TagRunnerResourcesOnCreate
+                # CreateTags is evaluated only as part of the create call. A later CreateTags is denied.
+                Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                Resource:
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:internet-gateway/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:route-table/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+                Condition:
+                  StringEquals:
+                    "ec2:CreateAction":
+                      - CreateVpc
+                      - CreateSubnet
+                      - CreateInternetGateway
+                      - CreateRouteTable
+                      - CreateSecurityGroup
+                    "aws:RequestTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+                  "ForAllValues:StringEquals":
+                    "aws:TagKeys":
+                      - "runharbor:managed"
+                      - "runharbor:deployment-id"
+              - Sid: DeleteTagsOnManagedRunnerResources
+                Effect: Allow
+                Action:
+                  - ec2:DeleteTags
+                Resource:
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:internet-gateway/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:route-table/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+              - Sid: MutateManagedRunnerNetwork
+                # Existing resources only, so ResourceTag. Attach/DetachInternetGateway authorize
+                # internet-gateway* and vpc*, both with ResourceTag. AssociateRouteTable authorizes
+                # route-table* (required) and subnet (the association this module creates), both with ResourceTag.
+                # Create/Delete/ReplaceRoute and DeleteRouteTable authorize route-table* only.
+                # Provider ~> 6 calls ModifyVpcAttribute and ModifySubnetAttribute after the tagged create.
+                Effect: Allow
+                Action:
+                  - ec2:DeleteVpc
+                  - ec2:ModifyVpcAttribute
+                  - ec2:DeleteSubnet
+                  - ec2:ModifySubnetAttribute
+                  - ec2:DeleteInternetGateway
+                  - ec2:AttachInternetGateway
+                  - ec2:DetachInternetGateway
+                  - ec2:DeleteRouteTable
+                  - ec2:CreateRoute
+                  - ec2:DeleteRoute
+                  - ec2:ReplaceRoute
+                  - ec2:AssociateRouteTable
+                Resource:
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:internet-gateway/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:route-table/*
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+              - Sid: DisassociateManagedRunnerRouteTable
+                # DisassociateRouteTable has no required resource type. route-table and subnet are optional
+                # and both list aws:ResourceTag. The API takes only AssociationId
+                # (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DisassociateRouteTable.html),
+                # so the resource ARN cannot be pinned. Resource stays "*" with the tag condition, in its
+                # own statement, so the mutations above are not opened up with it. If EC2 does not put the
+                # route table or subnet into the authorization context, this call fails closed.
+                Effect: Allow
+                Action:
+                  - ec2:DisassociateRouteTable
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+              - Sid: MutateManagedRunnerSecurityGroup
+                # DeleteSecurityGroup, AuthorizeSecurityGroupEgress, and RevokeSecurityGroupEgress
+                # authorize security-group* with ResourceTag. AuthorizeSecurityGroupEgress also lists
+                # security-group-rule with RequestTag, but that check applies only when the request
+                # includes TagSpecification. Provider ~> 6 revokes and authorizes rules by GroupId
+                # after the tagged CreateSecurityGroup, and does not tag the rules.
+                Effect: Allow
+                Action:
+                  - ec2:DeleteSecurityGroup
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/runharbor:managed": "true"
+                    "aws:RequestedRegion": !Ref AWS::Region
+              - Sid: ManageConnectorEvents
+                Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:ListTargetsByRule
+                  - events:TagResource
+                  - events:UntagResource
+                  - events:ListTagsForResource
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/rh-*
+              - Sid: ManageConnectorScheduler
+                Effect: Allow
+                Action:
+                  - scheduler:CreateScheduleGroup
+                  - scheduler:DeleteScheduleGroup
+                  - scheduler:GetScheduleGroup
+                  - scheduler:ListScheduleGroups
+                  - scheduler:ListTagsForResource
+                  - scheduler:TagResource
+                  - scheduler:UntagResource
+                Resource: !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/rh-*
+              # Schedule groups cannot be deleted until their schedules are removed.
+              # Keep this lifecycle permission scoped to RunHarbor-owned groups.
+              - Sid: DeleteConnectorSchedules
+                Effect: Allow
+                Action:
+                  - scheduler:DeleteSchedule
+                Resource: !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/rh-*/*
+
+Outputs:
+  DeployRoleArn:
+    Description: Set this value as the GitHub Actions repository variable AWS_ROLE_ARN.
+    Value: !GetAtt DeployRole.Arn
+  TrustedSubject:
+    Description: Exact GitHub OIDC subject this role trusts. There is no wildcard.
+    Value: !Sub
+      - 'repo:${Owner}@${OwnerId}/${Repo}@${RepoId}:environment:${Environment}'
+      - Owner: !Ref GitHubOwner
+        OwnerId: !Ref GitHubOwnerId
+        Repo: !Ref GitHubRepository
+        RepoId: !Ref GitHubRepositoryId
+        Environment: !Ref GitHubEnvironment

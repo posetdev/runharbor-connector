@@ -1,0 +1,60 @@
+# Copy to terraform.tfvars (gitignored) and fill in with values from your
+# deployment.json (see `runharbor init --config deployment.json`). The
+# Connector creates its own VPC; do not supply one. There is no image to
+# choose either: the host is Canonical's Ubuntu 24.04 LTS, resolved per
+# architecture at deploy time. Never commit the filled-in file.
+
+aws_region = "ap-southeast-2" # your Connector AWS account's region
+
+# --- from deployment.json, written by `runharbor init` ---
+name_prefix           = "acme-rh"
+deployment_id         = "dep_0123456789abcdef01234567"
+tenant_id             = "acme"
+saas_origin           = "https://runharbor.poset.dev"
+# Keyset-root pin only. Command-key rotation publishes additional keys in a root-signed
+# /.well-known/runharbor-command-keys.v1.json; changing the root itself requires a new pin.
+saas_public_key       = "MCowBQYDK2VwAyEAsJx6N+s89ulSq2jKlHy7lf9sJDcPw4f/g2gpHT2lXXQ="
+webhook_url           = "https://runharbor.example.com/webhooks/github/bk_00000000000000000000000000000000"
+installer_public_key  = "MCowBQYDK2VwAyEAqfN0kL4v8h2t9r7f0c1a2b3d4e5f6a7b8c9d0e1f2a3b4c5d="
+
+# One host distribution for both architectures: Canonical's Ubuntu 24.04 LTS,
+# the same family GitHub's ubuntu-latest runners use. There is no image to pin
+# here — at deploy time the module reads the current 24.04 AMI per architecture
+# from Canonical's public SSM parameters (see infra/modules/connector/locals.tf),
+# and writes what it resolved into Terraform state, so one deployment runs one
+# image id from first boot to its last runner. The root device name is read off
+# each image, so it does not belong here either.
+images = {
+  # The Connector selects this image from the `rh-x64-...` runner-label architecture.
+  x64 = {
+    root_volume_gib      = 60
+    max_duration_minutes = 60
+  }
+  # The Connector selects this image from the `rh-arm64-...` runner-label architecture.
+  arm64 = {
+    root_volume_gib      = 60
+    max_duration_minutes = 60
+  }
+}
+
+# Docker is installed by the bootstrap at every boot, from Docker's official apt
+# repository, with the version pinned (see bootstrap/linux-x64-runner.sh). It
+# cannot be a workflow step -- Actions creates service containers before a job's
+# first step runs -- and `container:` jobs need a Docker daemon on the host.
+# Ubuntu 24.04 + Docker is the whole host; anything else a job wants belongs in
+# a `container:` image (arm64 machines need an arm64 variant of that image).
+
+# This list is the customer-controlled spending ceiling. The Connector rejects an
+# unlisted SaaS request with a readable permanent error, and IAM enforces the same
+# list again at RunInstances. Keep the two baseline architectures available.
+allowed_instance_types = ["c7g.xlarge", "c7i.large"]
+
+# Spot is 43-49% cheaper and matches what the pool these runners replace
+# already paid. Only set this to "on-demand" as a temporary escape hatch when
+# Spot capacity refuses a launch in this account/region/instance-type triple.
+# purchase_mode = "on-demand"
+
+# Optional: this is the *only* workflow the Connector will dispatch for an
+
+log_retention_days   = 14
+orphan_sweep_enabled = true

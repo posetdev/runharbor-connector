@@ -1,0 +1,22 @@
+name: RunHarbor Hello World
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: runharbor-hello-world
+  cancel-in-progress: false
+
+jobs:
+  hello:
+    runs-on: [self-hosted, runharbor-linux-x64]
+    timeout-minutes: 10
+    steps:
+      - name: Print hello
+        shell: bash
+        run: |
+          echo "Hello World"
+          printf 'Runner OS: %s\n' "$RUNNER_OS"
+          printf 'Runner architecture: %s\n' "$RUNNER_ARCH"
